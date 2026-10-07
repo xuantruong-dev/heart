@@ -338,7 +338,10 @@
     let time=0,paused=false,lastTimestamp=0,rotationAngle=0,sceneDirty=false;
     let targetYaw=0,drag=null;
     let heartTop=0;
-    const cameraZoom=1,driftX=0,driftY=0;
+    let cameraZoom=1,targetZoom=1,pinch=null;
+    const pointers=new Map(),driftX=0,driftY=0;
+    const zoomMin=.6,zoomMax=1.25;
+    function requestZoom(value) {targetZoom=clamp(value,zoomMin,zoomMax);sceneDirty=true;}
     let manualBurstTime=-100;
     function resize() {
       width = window.innerWidth;
@@ -827,39 +830,66 @@
       const animated=!paused&&!document.hidden;
       if(animated) {
         time+=dt;
-        if(CONFIG.rotate&&!drag&&time>formationEnd)
+        if(CONFIG.rotate&&!drag&&!pinch&&time>formationEnd)
           targetYaw+=Math.min(dt,time-formationEnd)*TAU/Math.max(1,CONFIG.rotationSeconds);
       }
-      const cameraMoving=Math.abs(targetYaw-rotationAngle)>.00001;
+      const cameraMoving=Math.abs(targetYaw-rotationAngle)>.00001||Math.abs(targetZoom-cameraZoom)>.00001;
       if(!document.hidden&&(animated||cameraMoving||sceneDirty)) {
         rotationAngle+=(targetYaw-rotationAngle)*(1-Math.exp(-dt*16));
+        if(Math.abs(targetZoom-cameraZoom)>.00001) {
+          cameraZoom+=(targetZoom-cameraZoom)*(1-Math.exp(-dt*10));
+          updateSceneScale();messageLayoutDirty=true;
+        }
         render();sceneDirty=false;
       }
       requestAnimationFrame(frame);
     }
     function triggerBurst() {manualBurstTime=Math.max(time,formationEnd);paused=false;}
     function replay() {time=photoStart=rotationAngle=targetYaw=0;manualBurstTime=-100;paused=false;render();}
-    function resetView() {rotationAngle=targetYaw=0;render();}
+    function resetView() {rotationAngle=targetYaw=0;cameraZoom=targetZoom=1;updateSceneScale();messageLayoutDirty=true;render();}
+    function pointerDistance() {
+      const [a,b]=[...pointers.values()];return Math.hypot(a.x-b.x,a.y-b.y);
+    }
     canvas.addEventListener('pointerdown',event=>{
-      if(drag||!event.isPrimary||event.button!==0) return;
+      if(event.button!==0) return;
+      pointers.set(event.pointerId,{x:event.clientX,y:event.clientY});
+      canvas.setPointerCapture(event.pointerId);
+      if(pointers.size>=2) {
+        if(!pinch) pinch={distance:Math.max(1,pointerDistance()),zoom:targetZoom};
+        drag=null;document.body.classList.remove('dragging');return;
+      }
       targetYaw=rotationAngle;
       drag={id:event.pointerId,x:event.clientX,yaw:rotationAngle};
-      canvas.setPointerCapture(event.pointerId);document.body.classList.add('dragging');
+      document.body.classList.add('dragging');
     });
     canvas.addEventListener('pointermove',event=>{
+      if(pointers.has(event.pointerId)) pointers.set(event.pointerId,{x:event.clientX,y:event.clientY});
+      if(pinch&&pointers.size>=2) {requestZoom(pinch.zoom*pointerDistance()/pinch.distance);return;}
       if(!drag||event.pointerId!==drag.id) return;
       targetYaw=drag.yaw+(event.clientX-drag.x)*TAU/Math.max(400,Math.min(width,height));
       sceneDirty=true;
     });
     function endDrag(event) {
-      if(!drag||event.pointerId!==drag.id) return;
-      const id=drag.id;drag=null;document.body.classList.remove('dragging');
-      if(canvas.hasPointerCapture(id)) canvas.releasePointerCapture(id);
+      if(!pointers.has(event.pointerId)) return;
+      pointers.delete(event.pointerId);
+      if(pinch&&pointers.size<2) {
+        pinch=null;
+        const remaining=pointers.entries().next().value;
+        drag=remaining?{id:remaining[0],x:remaining[1].x,yaw:targetYaw}:null;
+      } else if(drag&&event.pointerId===drag.id) drag=null;
+      document.body.classList.toggle('dragging',!!drag);
+      if(canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
     }
     canvas.addEventListener('pointerup',endDrag);
     canvas.addEventListener('pointercancel',endDrag);
     canvas.addEventListener('lostpointercapture',endDrag);
-    window.addEventListener('blur',()=>{if(drag)endDrag({pointerId:drag.id});});
+    window.addEventListener('blur',()=>{for(const id of [...pointers.keys()])endDrag({pointerId:id});});
+    canvas.addEventListener('wheel',event=>{
+      event.preventDefault();
+      const pixels=event.deltaY*(event.deltaMode===1?16:event.deltaMode===2?height:1);
+      requestZoom(targetZoom*Math.exp(-clamp(pixels,-250,250)*.0015));
+    },{passive:false});
+    canvas.addEventListener('dblclick',()=>requestZoom(1));
     window.addEventListener('resize',resize);
     document.addEventListener('visibilitychange',()=>{lastTimestamp=0;});
     resize();requestAnimationFrame(frame);
@@ -874,6 +904,7 @@
       burst: triggerBurst,
       seek(seconds) { time = Math.max(0, Number(seconds) || 0); rotationAngle=targetYaw=(Math.max(0,time-formationEnd)/CONFIG.rotationSeconds*TAU)%TAU; manualBurstTime = -100; render(); },
       setRotation(degrees) { rotationAngle=targetYaw=(Number(degrees)||0)/180*Math.PI; render(); },
+      setZoom(value) {const zoom=Number(value);if(!Number.isFinite(zoom))return;cameraZoom=targetZoom=clamp(zoom,zoomMin,zoomMax);updateSceneScale();messageLayoutDirty=true;render();},
       resetView,
       get time() { return time; },
       get rotation() { return rotationAngle/Math.PI*180; },
