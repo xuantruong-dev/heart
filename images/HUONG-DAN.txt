@@ -1,0 +1,4 @@
+Đặt tối đa 5 ảnh của bạn trong thư mục này, ví dụ: 1.jpg, 2.jpg, 3.jpg, 4.jpg, 5.jpg.
+Mở blue-heart.html bằng trình soạn thảo, tìm PHOTO_SOURCES, bỏ dấu // trước các đường dẫn bạn muốn dùng.
+Bạn có thể đổi tên hoặc đuôi file trong danh sách để khớp ảnh PNG/JPG/WebP thực tế.
+Lưu code rồi tải lại trang để áp dụng.

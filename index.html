@@ -1,0 +1,890 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Trái tim hạt sáng xanh dương</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #02040d; }
+    canvas { display: block; width: 100%; height: 100%; }
+    #heart { touch-action: none; cursor: grab; }
+    body.dragging #heart { cursor: grabbing; }
+    .gift-message { position: fixed; left: 50%; transform: translateX(-50%); z-index: 3;
+      width: min(88vw,720px); margin: 0; pointer-events: none; text-align: center;
+      color: #f2acc6 ; font-family: 'Times New Roman', Cambria, serif; font-style: italic;
+      font-weight: 400; line-height: 1.45; letter-spacing: normal; overflow-wrap: anywhere;
+      text-shadow: 0 1px 4px #000, 0 0 18px #81bfff70, 0 0 42px #348cff35;
+      opacity: 0; overflow: hidden; will-change: opacity,filter; }
+    .gift-message[hidden] { display: none; }
+    .gift-word { display: inline-block; opacity: 0; }
+  </style>
+</head>
+<body>
+  <canvas id="heart" role="img" aria-label="Trái tim hạt xanh đứng thẳng trên đĩa sáng, giữa nền sao lấp lánh và những đợt sao băng. Ảnh trong khung trái tim bay từ tâm đĩa đến giữa tim rồi mờ dần."></canvas>
+  <p id="gift-message" class="gift-message" aria-live="polite" aria-atomic="true" hidden></p>
+  <script>
+  'use strict';
+  (() => {
+    // Chỉnh các giá trị này để thay đổi hiệu ứng. Không cần thư viện/CDN.
+    const CONFIG = {
+      heartParticles: 9000,
+      poolParticles: 1000,
+      risingParticles: 750,
+      stars: 950,
+      starBrightness: 1.05,
+      maxPhotos: 5,
+      photoFlightSeconds: 8,
+      introSeconds: 6,
+      formationSeconds: 4.8,
+      introMeteors: 24,
+      introHeadScale: 1.18,
+      meteorThickness: 3.1,
+      meteorSlowdown: 1.65,
+      bloom: 1.15,
+      cycleSeconds: 13,
+      rotate: true,
+      rotationSeconds: 75,   // Một vòng 360° quanh trục dọc của trái tim
+      heartSize: 0.26,       // Nửa chiều rộng trái tim / cạnh ngắn của vùng vẽ
+      glow: 1.1,
+      seed: 1207,
+      autoBurst: true,
+      background: '#02040d'
+    };
+
+    // THAY LỜI NHẮN TẠI ĐÂY: mỗi câu hiện nhanh từng từ, hoàn chỉnh rồi tan đi.
+    const GIFT_MESSAGES = [
+      'Có một điều bất ngờ dành riêng cho bạn…',
+      'Giữa muôn vì sao, bạn vẫn thật đặc biệt.',
+      'Gửi bạn một trái tim, cùng thật nhiều yêu thương.',
+      'Mong nụ cười luôn ở lại trên môi bạn. 💙',
+    ];
+    const MESSAGE_TIMING = {
+      delay: .9,       // Chờ sau khi tim tạo xong, rồi mới hiện câu đầu
+      wordInterval: .08, // Cách nhau 0,08 giây giữa mỗi từ; giảm để nhanh hơn
+      wordReveal: .12,   // Thời gian một từ sáng lên nhẹ
+      fade: 1.2,       // Thời gian cả câu tan dần
+      hold: 4.5,       // Thời gian giữ sau khi câu đã hiện đầy đủ
+      gap: .8,        // Khoảng trống trước khi hiện câu tiếp theo
+      loop: true      // Lặp lại bộ lời nhắn
+    };
+    const messageElement=document.getElementById('gift-message');
+    const messages=GIFT_MESSAGES.filter(message=>typeof message==='string'&&message.trim());
+    const wordInterval=Math.max(.02,MESSAGE_TIMING.wordInterval);
+    const wordReveal=Math.max(.04,MESSAGE_TIMING.wordReveal);
+    const messageFade=Math.max(.1,MESSAGE_TIMING.fade),messageHold=Math.max(.2,MESSAGE_TIMING.hold),messageGap=Math.max(.1,MESSAGE_TIMING.gap);
+    const messageSequence=messages.map(text=>{
+      const words=text.trim().split(/\s+/),typing=(words.length-1)*wordInterval+wordReveal;
+      return {words,typing,duration:typing+messageHold+messageFade+messageGap};
+    });
+    const messageCycle=messageSequence.reduce((sum,message)=>sum+message.duration,0);
+    let messageIndex=-1,messageWords=[],messageCeiling=-100,messageBaseTop=0,messageLayoutDirty=true;
+
+    // THAY ẢNH TẠI ĐÂY: đặt file trong thư mục images cạnh file HTML.
+    // Bỏ // trước dòng muốn dùng. Chỉ dùng tối đa 5 ảnh, tên phải khớp file thực tế.
+    const PHOTO_SOURCES = [
+       'images/1.jpg',
+       'images/2.jpg',
+       'images/3.jpg',
+       'images/4.jpg',
+       'images/5.jpg',
+    ];
+
+    const canvas = document.getElementById('heart');
+    const ctx = canvas.getContext('2d', { alpha: false });
+    // Gom toàn bộ hạt thành một lượt vẽ WebGL. Canvas 2D vẫn vẽ các sợi và bệ.
+    // Trình duyệt không hỗ trợ WebGL sẽ dùng sprite Canvas 2D bên dưới.
+    function createParticleRenderer() {
+      const layer = document.createElement('canvas');
+      layer.setAttribute('aria-hidden', 'true');
+      Object.assign(layer.style, {position: 'fixed', inset: '0', pointerEvents: 'none', zIndex: '2'});
+      const gl = layer.getContext('webgl', {alpha: true, antialias: false, depth: false, preserveDrawingBuffer: false});
+      if (!gl) return null;
+      function compile(type, source) {
+        const shader = gl.createShader(type);
+        gl.shaderSource(shader, source); gl.compileShader(shader);
+        if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) throw Error(gl.getShaderInfoLog(shader));
+        return shader;
+      }
+      try {
+        const program = gl.createProgram();
+        gl.attachShader(program, compile(gl.VERTEX_SHADER, `
+          attribute vec2 aPosition;
+          attribute float aSize;
+          attribute vec4 aColor;
+          uniform vec2 uResolution;
+          uniform float uDpr;
+          uniform mediump float uHalo;
+          varying vec4 vColor;
+          void main() {
+            vec2 p = aPosition / uResolution * 2.0 - 1.0;
+            gl_Position = vec4(p.x, -p.y, 0.0, 1.0);
+            gl_PointSize = aSize * uDpr * (1.0 + uHalo * 3.0);
+            vColor = aColor;
+          }`));
+        gl.attachShader(program, compile(gl.FRAGMENT_SHADER, `
+          precision mediump float;
+          varying vec4 vColor;
+          uniform mediump float uHalo;
+          uniform float uBloom;
+          void main() {
+            float radius = length(gl_PointCoord * 2.0 - 1.0);
+            if (radius > 1.0) discard;
+            float glow = exp(-radius * radius * mix(7.8, 5.0, uHalo));
+            float core = 1.0 - smoothstep(0.06, 0.24, radius);
+            vec3 color = mix(vColor.rgb, vec3(0.90, 0.97, 1.0), core * 0.88 * (1.0-uHalo));
+            float intensity = mix(1.0, 0.065 * uBloom, uHalo);
+            gl_FragColor = vec4(color, vColor.a * glow * intensity);
+          }`));
+        gl.linkProgram(program);
+        if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw Error(gl.getProgramInfoLog(program));
+        gl.useProgram(program);
+        const buffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+        const data = new Float32Array((CONFIG.heartParticles + CONFIG.poolParticles * 3 + CONFIG.risingParticles + CONFIG.stars + 6000) * 7);
+        gl.bufferData(gl.ARRAY_BUFFER, data.byteLength, gl.DYNAMIC_DRAW);
+        [['aPosition',2,0],['aSize',1,8],['aColor',4,12]].forEach(([name,size,offset])=>{
+          const location=gl.getAttribLocation(program,name);
+          gl.enableVertexAttribArray(location);
+          gl.vertexAttribPointer(location,size,gl.FLOAT,false,28,offset);
+        });
+        const resolution = gl.getUniformLocation(program, 'uResolution');
+        const dprLocation = gl.getUniformLocation(program, 'uDpr');
+        const haloLocation = gl.getUniformLocation(program, 'uHalo');
+        const bloomLocation = gl.getUniformLocation(program, 'uBloom');
+        gl.uniform1f(bloomLocation, CONFIG.bloom);
+        gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+        gl.clearColor(0,0,0,0);
+        canvas.after(layer);
+        let length = 0;
+        return {
+          begin() { length = 0; },
+          add(x,y,diameter,color,alpha) {
+            data[length++]=x; data[length++]=y; data[length++]=diameter;
+            data[length++]=color[0];data[length++]=color[1];data[length++]=color[2];data[length++]=alpha;
+          },
+          resize(w,h,dpr) {
+            layer.width=Math.round(w*dpr);layer.height=Math.round(h*dpr);
+            gl.viewport(0,0,layer.width,layer.height);
+            gl.uniform2f(resolution,w,h);gl.uniform1f(dprLocation,dpr);
+          },
+          flush() {
+            gl.clear(gl.COLOR_BUFFER_BIT);
+            gl.bufferSubData(gl.ARRAY_BUFFER,0,data.subarray(0,length));
+            // Bloom hai thang kích thước: quầng xanh rộng, sau đó lõi hạt sắc.
+            gl.uniform1f(haloLocation,1);
+            gl.drawArrays(gl.POINTS,0,length/7);
+            gl.uniform1f(haloLocation,0);
+            gl.drawArrays(gl.POINTS,0,length/7);
+          }
+        };
+      } catch (error) {
+        console.warn('WebGL: dùng Canvas 2D dự phòng.',error.message);
+        layer.remove();
+        return null;
+      }
+    }
+    const gpuParticles = createParticleRenderer();
+    const TAU = Math.PI * 2;
+    const fract = x => x - Math.floor(x);
+    let randomState = CONFIG.seed;
+    // PRNG giúp hình dạng không bị ngẫu nhiên lại sau khi đổi kích thước màn hình.
+    function random() {
+      randomState |= 0;
+      randomState = randomState + 0x6D2B79F5 | 0;
+      let n = Math.imul(randomState ^ randomState >>> 15, 1 | randomState);
+      n = n + Math.imul(n ^ n >>> 7, 61 | n) ^ n;
+      return ((n ^ n >>> 14) >>> 0) / 4294967296;
+    }
+    const clamp = (x, lo = 0, hi = 1) => Math.max(lo, Math.min(hi, x));
+    function smoothstep(a, b, x) {
+      const q = clamp((x - a) / (b - a));
+      return q * q * (3 - 2 * q);
+    }
+    const formationEnd=CONFIG.introSeconds+CONFIG.formationSeconds;
+    function formationState() {
+      const age=time-CONFIG.introSeconds;
+      return {age,progress:smoothstep(0,CONFIG.formationSeconds,age),opacity:smoothstep(0,.45,age)};
+    }
+    function particleAssembly(seed) {
+      const delay=seed*CONFIG.formationSeconds*.47;
+      const duration=.20+Math.sqrt(seed)*CONFIG.formationSeconds*.43;
+      return smoothstep(0,duration,time-CONFIG.introSeconds-delay);
+    }
+    const heart = [];
+    function sampleHeart(surface) {
+      // Khối tim 3D: (x² + 2.25z² + y² - 1)³ - x²y³ - .1125z²y³ <= 0.
+      // Lấy nhiều hạt gần bề mặt và một phần bên trong để tạo viền sáng + chiều sâu.
+      for (;;) {
+        const x = (random() * 2 - 1) * 1.16;
+        const up = random() * 2.35 - 1.05;
+        const z = (random() * 2 - 1) * .72;
+        const a = x*x + 2.25*z*z + up*up - 1;
+        const f = a*a*a - x*x*up*up*up - .1125*z*z*up*up*up;
+        if (f > 0) continue;
+        if (surface) {
+          const gx = 6*x*a*a - 2*x*up*up*up;
+          const gz = 13.5*z*a*a - .225*z*up*up*up;
+          const gy = 6*up*a*a - 3*x*x*up*up - .3375*z*z*up*up;
+          const distance = Math.abs(f) / (Math.hypot(gx, gy, gz) + .00001);
+          if (distance > .045) continue;
+        }
+        const notch = .095 * Math.exp(-Math.pow(x / .18, 2)) * smoothstep(.35, .85, up);
+        return {x: x * .90, y: -(up - .10) * .79 + notch, z: z * .90};
+      }
+    }
+    for (let i = 0; i < CONFIG.heartParticles; i++) {
+      const shell = random() < .74;
+      const point = sampleHeart(shell);
+      heart.push({
+        x: point.x,
+        y: point.y,
+        z: point.z,
+        shell,
+        haze: random() < .005,
+        phase: random() * TAU,
+        turn: random() * TAU,
+        rate: .7 + random() * 1.8,
+        size: .28 + random() * .68,
+        light: .35 + random() * .65,
+        shade: Math.floor(random() * 4),
+        scatter: Math.pow(random(), 8),
+        reveal: random()
+      });
+    }
+    const pool = Array.from({ length: CONFIG.poolParticles }, () => ({
+      angle: random() * TAU, radius: Math.sqrt(random()), phase: random() * TAU,
+      rate: .45 + random() * 1.1, size: .4 + random() * 1.2
+    }));
+    const rising = Array.from({ length: CONFIG.risingParticles }, (_,i) => ({
+      age: random(), phase: random() * TAU, rate: .15 + random() * .17,
+      radius: .1 + random() * .7, size: .5 + random() * 1.1, lane:i%5
+    }));
+    const stars = Array.from({length: CONFIG.stars}, (_,i) => ({
+      x: random(), y: random(), depth: i % 3,
+      phase: random() * TAU, rate: .2 + random() * .35,
+      radius: .15 + random() * .28 + (i % 3) * .08,
+      light: .18 + random() * .36,
+      bright: i<8
+    }));
+    const palette = ['#2563eb', '#3b82f6', '#93c5fd', '#d3efff'];
+
+    // Các sprite đã làm mờ được vẽ cộng sáng (lighter). Tránh shadowBlur trên từng hạt.
+    function makeSprite(color, core) {
+      const sprite = document.createElement('canvas');
+      sprite.width = sprite.height = 48;
+      const sc = sprite.getContext('2d');
+      const gradient = sc.createRadialGradient(24, 24, 0, 24, 24, 24);
+      gradient.addColorStop(0, core);
+      gradient.addColorStop(.13, color);
+      gradient.addColorStop(.4, color + '68');
+      gradient.addColorStop(1, color + '00');
+      sc.fillStyle = gradient;
+      sc.fillRect(0, 0, 48, 48);
+      sprite.rgb = [1,3,5].map(index => parseInt(color.slice(index,index+2),16)/255);
+      return sprite;
+    }
+    const sprites = palette.map(color => makeSprite(color, '#e9f8ff'));
+    const cyanSprite = makeSprite('#05cfff', '#b8ffff');
+    const blueHalo = makeSprite('#096dff', '#178cff');
+    const starSprite = makeSprite('#80aaff', '#ffffff');
+    const backgroundCanvas = document.createElement('canvas');
+    const bgContext = backgroundCanvas.getContext('2d');
+    const photoCanvas=document.createElement('canvas');
+    photoCanvas.setAttribute('aria-hidden','true');
+    Object.assign(photoCanvas.style,{position:'fixed',inset:'0',pointerEvents:'none',zIndex:'1'});
+    document.body.append(photoCanvas);
+    const photoContext=photoCanvas.getContext('2d');
+    const photos=[];
+    let photoStart=0;
+    const PHOTO_LIMIT=Math.min(5,Math.max(1,Math.floor(CONFIG.maxPhotos)));
+
+    async function decodePhoto(source,name) {
+      const image=new Image();image.src=source;await image.decode();
+      if(!image.naturalWidth||!image.naturalHeight) throw Error('Ảnh không hợp lệ');
+      const ratio=Math.min(1,900/Math.max(image.naturalWidth,image.naturalHeight));
+      const reduced=document.createElement('canvas');
+      reduced.width=Math.max(1,Math.round(image.naturalWidth*ratio));
+      reduced.height=Math.max(1,Math.round(image.naturalHeight*ratio));
+      const rc=reduced.getContext('2d');rc.fillStyle='#061021';rc.fillRect(0,0,reduced.width,reduced.height);
+      rc.drawImage(image,0,0,reduced.width,reduced.height);
+      // Viền và quầng sáng được dựng một lần, ảnh không cần xử lý lại mỗi khung hình.
+      const card=document.createElement('canvas');card.width=card.height=224;
+      const cc=card.getContext('2d');cc.shadowColor='#63cfff';cc.shadowBlur=12;
+      cc.fillStyle='#061327';cc.strokeStyle='#8de6ff';cc.lineWidth=1.5;
+      heartPhotoOutline(cc);cc.fill();cc.stroke();cc.shadowBlur=0;
+      cc.save();heartPhotoOutline(cc);cc.clip();
+      const fit=Math.max(188/reduced.width,178/reduced.height);
+      const w=reduced.width*fit,h=reduced.height*fit;
+      cc.drawImage(reduced,18+(188-w)/2,32+(178-h)/2,w,h);cc.restore();
+      heartPhotoOutline(cc);cc.stroke();
+      return {name,card};
+    }
+    function heartPhotoOutline(context) {
+      context.beginPath();context.moveTo(112,65);
+      context.bezierCurveTo(82,20,18,32,18,83);
+      context.bezierCurveTo(18,132,65,167,112,210);
+      context.bezierCurveTo(159,167,206,132,206,83);
+      context.bezierCurveTo(206,32,142,20,112,65);context.closePath();
+    }
+    async function loadManualPhotos() {
+      for(const source of PHOTO_SOURCES.filter(url=>typeof url==='string'&&url.trim()).slice(0,PHOTO_LIMIT)) {
+        try { photos.push(await decodePhoto(source,source)); sceneDirty=true; }
+        catch { console.warn('Không đọc được ảnh: '+source); }
+      }
+    }
+
+    let width=0,height=0,scale=1,centerX=0,centerY=0,baseY=0;
+    let time=0,paused=false,lastTimestamp=0,rotationAngle=0,sceneDirty=false;
+    let targetYaw=0,drag=null;
+    let heartTop=0;
+    const cameraZoom=1,driftX=0,driftY=0;
+    let manualBurstTime=-100;
+    function resize() {
+      width = window.innerWidth;
+      height = window.innerHeight;
+      const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+      canvas.width = Math.round(width * dpr);
+      canvas.height = Math.round(height * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      photoCanvas.width=Math.round(width*dpr);photoCanvas.height=Math.round(height*dpr);
+      photoContext.setTransform(dpr,0,0,dpr,0,0);
+      if (gpuParticles) gpuParticles.resize(width,height,dpr);
+      updateSceneScale();
+      messageLayoutDirty=true;
+      cacheBackground();
+      render();
+    }
+    function updateSceneScale() {
+      scale = Math.min(width, height * .88) * CONFIG.heartSize * cameraZoom;
+      centerX = width * .5;
+      centerY = height * .46;
+      baseY = centerY + scale * 1.28;
+    }
+    function cacheBackground() {
+      backgroundCanvas.width = width;
+      backgroundCanvas.height = height;
+      bgContext.fillStyle = CONFIG.background;
+      bgContext.fillRect(0,0,width,height);
+    }
+    function drawStars() {
+      for (const p of stars) {
+        const speed = .18 + p.depth * .35;
+        const x = fract(p.x + time * .0006 * speed) * width + driftX * (2 + p.depth * 4);
+        const y = fract(p.y - time * .0004 * speed) * height + driftY * (2 + p.depth * 4);
+        const twinkle = .54 + .46 * Math.pow(.5+.5*Math.sin(time*p.rate+p.phase),1.4);
+        const alpha = clamp(p.light * twinkle * CONFIG.starBrightness*(p.bright?2.4:1));
+        particle(starSprite,x,y,p.radius*(p.bright?2.1:1),alpha);
+        if (p.bright) {
+          ctx.globalAlpha=alpha*.8;ctx.strokeStyle='#9abef8';ctx.lineWidth=.5;
+          const radius=3.5+twinkle*2;
+          ctx.beginPath();ctx.moveTo(x-radius,y);ctx.lineTo(x+radius,y);
+          ctx.moveTo(x,y-radius);ctx.lineTo(x,y+radius);ctx.stroke();
+        }
+      }
+      drawMeteors();
+    }
+    // Mỗi đợt có các làn song song riêng, đợt kế tiếp chỉ bắt đầu khi đợt trước đã hết.
+    const weatherSeed=Math.floor(Math.random()*4294967296);
+    function weatherRandom(index,salt=0) {
+      let n=(weatherSeed^Math.imul(index+1,0x45d9f3b)^Math.imul(salt+1,0x27d4eb2d))>>>0;
+      n=Math.imul(n^(n>>>16),0x45d9f3b);n=Math.imul(n^(n>>>16),0x45d9f3b);
+      return ((n^(n>>>16))>>>0)/4294967296;
+    }
+    // Chỉ một màn mở đầu: mỗi làn có đúng một sao băng, không chia nhiều đợt.
+    const openingCount=Math.max(1,Math.min(32,CONFIG.introMeteors));
+    const meteorShower=Array.from({length:openingCount},(_,i)=>{
+      return {start:-.25+weatherRandom(i,4)*.45,duration:CONFIG.introSeconds*.88,
+        angle:.51+weatherRandom(0,1)*.16,offset:(i+.5+(weatherRandom(i,2)-.5)*.18)/openingCount,
+        size:.85+weatherRandom(i,3)*.55,headScale:CONFIG.introHeadScale};
+    });
+    let meteorBatches=[],nextMeteorTime=formationEnd+.35,lastMeteorClock=0,weatherIndex=0;
+    let activeMeteorCount=0;
+    function scheduleMeteorBatches() {
+      if(time<lastMeteorClock-.5) {meteorBatches=[];nextMeteorTime=formationEnd+.35;weatherIndex=0;}
+      lastMeteorClock=time;
+      while(nextMeteorTime<=time+.1) {
+        const index=weatherIndex++,count=weatherRandom(index,10)<.5?3:5;
+        const duration=(1.35+weatherRandom(index,11)*.80)*CONFIG.meteorSlowdown;
+        const angle=.38+weatherRandom(index,12)*.42,start=nextMeteorTime;
+        const items=Array.from({length:count},(_,i)=>({start,duration,angle,
+          offset:(i+.5+(weatherRandom(index*5+i,13)-.5)*.24)/count,
+          size:.8+weatherRandom(index*5+i,14)*.5}));
+        meteorBatches.push({items,start,end:start+duration});
+        nextMeteorTime=start+duration+1.3+weatherRandom(index,15)*3.1;
+      }
+      meteorBatches=meteorBatches.filter(batch=>batch.end>=time-30);
+    }
+    function drawMeteor(m,age,strength=1) {
+      if(age<0||age>m.duration) return;
+      const u=age/m.duration,life=smoothstep(0,.07,u)*(1-smoothstep(.80,1,u))*strength;
+      if(life<.01) return;
+      const dx=-Math.cos(m.angle),dy=Math.sin(m.angle),nx=dy,ny=-dx;
+      const offset=(nx*width+ny*height)*m.offset;
+      const shift=offset-(nx*width/2+ny*height/2);
+      const cx=width/2+nx*shift,cy=height/2+ny*shift;
+      const tx=[-cx/dx,(width-cx)/dx].sort((a,b)=>a-b);
+      const ty=[-cy/dy,(height-cy)/dy].sort((a,b)=>a-b);
+      const from=Math.max(tx[0],ty[0]),to=Math.min(tx[1],ty[1]);
+      const length=Math.min(190,width*.25,(to-from)*.34);
+      const travel=from-8+(to-from+length+16)*u;
+      const x=cx+dx*travel,y=cy+dy*travel;
+      const tailX=x-dx*length,tailY=y-dy*length;
+      activeMeteorCount++;
+      const gradient=ctx.createLinearGradient(tailX,tailY,x,y);
+      gradient.addColorStop(0,'#649eff00');gradient.addColorStop(.65,'#78afff60');gradient.addColorStop(1,'#d9f5ff');
+      ctx.globalAlpha=life*.12;ctx.strokeStyle=gradient;ctx.lineWidth=(m.size||1.1)*CONFIG.meteorThickness*3;
+      ctx.beginPath();ctx.moveTo(tailX,tailY);ctx.lineTo(x,y);ctx.stroke();
+      ctx.globalAlpha=life*.9;ctx.lineWidth=(m.size||1.1)*CONFIG.meteorThickness;ctx.stroke();
+      for(let j=0;j<24;j++) {
+        const v=j/24;
+        particle(starSprite,x-v*dx*length,y-v*dy*length,.60+(1-v)*.24,life*(1-v)*.44);
+      }
+      particle(starSprite,x,y,2.6*(m.size||1)*(m.headScale||1),life*.90);
+    }
+    function drawMeteors() {
+      activeMeteorCount=0;
+      if(time<CONFIG.introSeconds) for(const m of meteorShower) drawMeteor(m,time-m.start);
+      if(time>=formationEnd) {
+        scheduleMeteorBatches();
+        for(const batch of meteorBatches) if(time>=batch.start&&time<=batch.end)
+          for(const m of batch.items) drawMeteor(m,time-m.start);
+      }
+    }
+    function particle(sprite, x, y, size, alpha) {
+      if (alpha < .008) return;
+      const diameter = size * 7;
+      if (gpuParticles) { gpuParticles.add(x,y,diameter,sprite.rgb,clamp(alpha)); return; }
+      ctx.globalAlpha = clamp(alpha);
+      ctx.drawImage(sprite, x - diameter / 2, y - diameter / 2, diameter, diameter);
+    }
+    const projected = {x:0,y:0,z:0,depth:1};
+    function project(x, y, z, cosTilt, sinTilt) {
+      // Chỉ quay quanh trục dọc: tọa độ y không bị xoay, tim luôn đứng thẳng.
+      const xx = x * cosTilt + z * sinTilt;
+      const zz = z * cosTilt - x * sinTilt;
+      const depth = 1 / (1 - zz * .16);
+      projected.x = centerX + xx * scale * depth + driftX * scale * .035;
+      projected.y = centerY + y * scale * depth + driftY * scale * .02;
+      projected.depth=depth;projected.z=zz;
+      return projected;
+    }
+    function burstEnvelope(local) {
+      return smoothstep(3.7, 5.0, local) * (1 - smoothstep(7.4, 9.0, local));
+    }
+    function burstStrength() {
+      if(time<formationEnd) return 0;
+      const auto = CONFIG.autoBurst ? burstEnvelope((time-formationEnd) % CONFIG.cycleSeconds) : 0;
+      const manualAge = time - manualBurstTime;
+      const manual = manualEnvelope(manualAge);
+      return Math.max(auto, manual);
+    }
+    function manualEnvelope(age) {
+      return smoothstep(0,.6,age)*(1-smoothstep(2.1,3.6,age));
+    }
+    function drawPool(burst, reveal) {
+      if(reveal<=0) return;
+      const formation=formationState().progress;
+      const radius = scale * (.74 + .035 * Math.sin(time * 2));
+      const lift = scale * .12 * burst;
+      // Halo nền có hình ellipse, giống bệ năng lượng trong video.
+      ctx.save();
+      ctx.translate(centerX, baseY);
+      ctx.scale(1, .29);
+      ctx.globalAlpha = (.55 + burst * .10) * reveal * formation;
+      ctx.drawImage(blueHalo, -radius * 1.48, -radius * 1.48, radius * 2.96, radius * 2.96);
+      const core = ctx.createRadialGradient(0, 0, 0, 0, 0, radius);
+      core.addColorStop(0, '#5cffff');
+      core.addColorStop(.45, '#12eaff');
+      core.addColorStop(.78, '#00b8efb0');
+      core.addColorStop(1, '#006fff00');
+      ctx.fillStyle = core;
+      ctx.globalAlpha = .74 * reveal * formation;
+      ctx.fillRect(-radius, -radius, radius * 2, radius * 2);
+      ctx.restore();
+
+      for (const p of pool) {
+        const assembled=time>=formationEnd?1:particleAssembly(p.phase/TAU);
+        if(assembled<=0) continue;
+        const a = p.angle + time * p.rate;
+        const r = radius * p.radius*(1+(1-assembled)*.4);
+        const ripple = Math.sin(a * 5 + time * 3 + p.phase);
+        const x = centerX + Math.cos(a) * r;
+        const y = baseY + Math.sin(a) * r * .22 - ripple * scale * .018
+          - lift * (1 - p.radius) * (.5 + .5 * Math.sin(p.phase + time * 3));
+        particle(cyanSprite, x, y, p.size * Math.max(.65, scale / 180),
+          reveal * (.20+.80*assembled) * (.40 + .35 * (1 - p.radius)) * CONFIG.glow);
+      }
+      // Arc đứt đoạn chạy quanh bệ; nhiều nét mỏng thay vì một vòng viền đặc.
+      for (let ring = 0; ring < 7; ring++) {
+        const start = time * (ring % 2 ? -1.3 : 1) + ring * 1.6;
+        const rr = radius * (.83 + ring * .035);
+        ctx.beginPath();
+        for (let j = 0; j <= 40; j++) {
+          const a = start + j / 40 * (1.0 + .18 * Math.sin(time + ring));
+          const x = centerX + Math.cos(a) * rr;
+          const y = baseY + Math.sin(a) * rr * .24
+            + Math.sin(a * 7 + time * 3 + ring) * scale * .016;
+          if (j === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.strokeStyle = ring % 2 ? '#a5f7ff' : '#04caff';
+        ctx.lineWidth = Math.max(.7, scale / 190);
+        ctx.globalAlpha = reveal * formation * .48;
+        ctx.stroke();
+      }
+    }
+    function drawRising(burst, reveal) {
+      if(reveal<=0) return;
+      const elapsed=time-CONFIG.introSeconds;
+      const cosTilt=Math.cos(rotationAngle),sinTilt=Math.sin(rotationAngle);
+      for (const p of rising) {
+        const travel=elapsed*p.rate-p.age*1.2;
+        if(travel<0) continue;
+        const age=fract(travel),path=energyPath(p.lane,age);
+        const jitter=.035*Math.sin(age*Math.PI);
+        const point=project(path.x+Math.cos(p.phase)*jitter,path.y+Math.sin(p.phase)*jitter,path.z,cosTilt,sinTilt);
+        const lift=smoothstep(0,.88,age);
+        const x=point.x-driftX*scale*.035*(1-lift),y=point.y-driftY*scale*.02*(1-lift),life=Math.sin(age*Math.PI);
+        particle(cyanSprite,x,y,p.size*Math.max(.6,scale/180),life*reveal*(.15+burst*.20));
+        if(p.size>1.2&&age>.04) {
+          for(let j=1;j<=3;j++) {
+            const tail=energyPath(p.lane,Math.max(0,age-j*.008));
+            const pp=project(tail.x,tail.y,tail.z,cosTilt,sinTilt);
+            const tailLift=smoothstep(0,.88,Math.max(0,age-j*.008));
+            particle(cyanSprite,pp.x-driftX*scale*.035*(1-tailLift),pp.y-driftY*scale*.02*(1-tailLift),p.size*.55,life*reveal*(1-j/4)*(.06+burst*.1));
+          }
+        }
+      }
+    }
+    function drawHeart(burst, reveal) {
+      if(reveal<=0) return;
+      // Quay cả khối tim 360°; mỗi hạt luôn bám vào hình tim gốc.
+      const tilt = rotationAngle + driftX * .035;
+      const cosTilt=Math.cos(tilt),sinTilt=Math.sin(tilt);
+      const depthRange=.65*Math.abs(cosTilt)+Math.abs(sinTilt);
+      const breath = 1 + .006 * Math.sin(time * 2.2);
+      const drift = .010 * Math.sin(time * 1.2);
+      const unit = Math.max(.6, scale / 185);
+      let upper=height;
+      for (const p of heart) {
+        const assembled=time>=formationEnd?1:particleAssembly(p.reveal);
+        if(assembled<=0) continue;
+        const flowA = Math.sin(p.x*5.3+p.y*6.7+p.z*8+time*1.0);
+        const flowB = Math.sin(-p.x*7+p.y*3.5-p.z*6-time*.72);
+        const flowC = Math.cos(p.y*5-p.x*4+p.z*9+time*.85);
+        const wave = Math.sin(p.y * 9 + time * 2.7 + p.z * 7 + flowA*.6);
+        const lower=smoothstep(-.18,.8,p.y);
+        // Giữ viền tim ổn định. Năng lượng chuyển qua độ sáng thay vì xoắn/tản hình.
+        const microMotion=p.shell?.0015:.004;
+        const pulseMotion=burst*lower*(p.shell?.0015:.006);
+        let x=p.x*breath+flowA*(microMotion+pulseMotion);
+        let y=p.y*breath+drift+flowB*(microMotion+pulseMotion);
+        let z=p.z+flowC*(microMotion+pulseMotion);
+        if(assembled<1) {
+          const a=p.turn,bend=Math.sin(assembled*Math.PI)*.12;
+          x=Math.cos(a)*.65*(1-assembled)+x*assembled+Math.sin(a+assembled*4)*bend;
+          y=(1.28+Math.sin(a)*.10)*(1-assembled)+y*assembled;
+          z=Math.sin(a)*.45*(1-assembled)+z*assembled+Math.cos(a+assembled*4)*bend;
+        }
+        const pos = project(x, y, z, cosTilt, sinTilt);
+        upper=Math.min(upper,pos.y);
+        const twinkle = .76 + .24 * Math.sin(time * p.rate * 1.4 + p.phase);
+        const cloud=smoothstep(-.50,1.1,flowA*.75+flowB*.65+flowC*.35);
+        const bands=.18+.82*cloud;
+        const localReveal = reveal*(.28+.72*assembled);
+        const front = .68 + .32 * clamp((pos.z + depthRange) / (2*depthRange));
+        const rim = p.shell ? .72+.40*(1-clamp(Math.abs(pos.z)/depthRange)) : .58;
+        let alpha = p.light * twinkle * bands * front * rim * localReveal * 1.65;
+        alpha += burst * Math.max(0, wave) * lower * .42 * reveal;
+        const size = p.size * unit * pos.depth;
+        if(p.haze) {
+          particle(blueHalo,pos.x,pos.y,4.5*unit,localReveal*cloud*cloud*.05*CONFIG.bloom);
+        }
+        // Vầng xanh và lõi điểm sắc: tách hạt rõ trên nền đen.
+        const hot = burst * Math.max(0, wave) * clamp((p.y + .4) * 1.4);
+        particle(hot > .35 ? cyanSprite : sprites[p.shade], pos.x, pos.y,
+          size * (1.30+cloud*.25), alpha * (.63 + hot * .3) * (gpuParticles ? 1.7 : 1) * CONFIG.glow);
+        if (!gpuParticles) {
+          ctx.globalAlpha = clamp(alpha);
+          ctx.fillStyle = hot > .35 ? '#83ecff' : palette[p.shade];
+          const dot = Math.max(.4, size * .83);
+          ctx.fillRect(pos.x - dot / 2, pos.y - dot / 2, dot, dot);
+        }
+      }
+      heartTop=upper;
+    }
+    const ribbonPoints=Array.from({length:19},()=>({x:0,y:0}));
+    function drawRibbons(burst, reveal) {
+      if (burst < .01) return;
+      // Vệt ngắn có đầu sáng và đuôi thuôn; không vẽ cả lò xo từ đế lên đỉnh.
+      const unit=Math.max(.65,scale/180);
+      for (let k = 0; k < 18; k++) {
+        const phase=k*2.39996;
+        const age=fract(time*(.19+(k%5)*.014)+k*.618);
+        const length=.035+(k%7)*.008;
+        const life=Math.sin(age*Math.PI);
+        const appear=life*burst*reveal*.65;
+        const points=ribbonPoints;
+        for(let j=0;j<=18;j++) {
+          const u=Math.max(0,age-j/18*length);
+          const a=phase+u*10-time*1.1;
+          const r=scale*(.10+.27*Math.sin(u*Math.PI))*(.82+.15*Math.sin(u*13+phase+time*.8));
+          points[j].x=centerX+Math.cos(a)*r+scale*.035*Math.sin(u*28+phase+time);
+          points[j].y=baseY-u*scale*1.00+Math.sin(a)*r*.27+scale*.020*Math.cos(u*24-phase-time*1.6);
+        }
+        for(let pass=0;pass<2;pass++) {
+          ctx.beginPath();
+          for(let j=0;j<points.length;j++) {
+            const p=points[j];
+            if(j===0)ctx.moveTo(p.x,p.y);else ctx.lineTo(p.x,p.y);
+          }
+          ctx.strokeStyle=pass?'#9df8ff':'#088bff';
+          ctx.lineWidth=(pass?.55:2.8)*unit;
+          ctx.globalAlpha=appear*(pass?.55:.15);
+          ctx.stroke();
+        }
+        for(let j=0;j<points.length;j+=2) {
+          const p=points[j];
+          particle(cyanSprite,p.x,p.y,unit*(1.0-j/24),appear*(1-j/20)*.5);
+        }
+        particle(cyanSprite,points[0].x,points[0].y,unit*1.5,appear*.9);
+      }
+    }
+    function drawSurge(burst, reveal) {
+      if (burst < .01) return;
+      // Hai sóng có dòng thời gian riêng để bấm Bùng sáng giữa chu kỳ không gây nhảy.
+      if(CONFIG.autoBurst) {
+        const local=(time-formationEnd)%CONFIG.cycleSeconds;
+        drawSurgePulse(local-3.8,burstEnvelope(local),reveal);
+      }
+      const age=time-manualBurstTime;
+      drawSurgePulse(age,manualEnvelope(age),reveal);
+    }
+    function drawSurgePulse(elapsed,burst,reveal) {
+      if(burst<.01) return;
+      const progress = smoothstep(0, 1.7, elapsed);
+      const strength = burst * (1 - smoothstep(1.8, 3.0, elapsed)) * reveal * .38;
+      const bandY = baseY - progress * scale * .85;
+      // Mặt sóng sáng rộng phóng từ đế lên: giai đoạn rõ nhất khoảng giây 4–6.
+      for (const p of pool) {
+        const a = p.angle + time * 2.4;
+        const radius = scale * (.46 - progress * .13) * p.radius;
+        const x = centerX + Math.cos(a) * radius;
+        const y = bandY + Math.sin(a) * radius * .2 + Math.sin(p.phase + time * 5) * scale * .09;
+        particle(cyanSprite, x, y, p.size * Math.max(.6, scale / 180), strength * .85);
+      }
+      // Vòng xoáy sáng ngang qua nửa dưới tim khi luồng năng lượng bắt đầu lắng.
+      const orbit = smoothstep(1.3, 2.1, elapsed) * (1 - smoothstep(3.1, 4.5, elapsed)) * burst;
+      if (orbit > .01) {
+        for (let k = 0; k < 4; k++) {
+          ctx.beginPath();
+          for (let j = 0; j <= 70; j++) {
+            const a = time * 1.8 + k * 1.8 + j / 70 * 2.7;
+            const r = scale * (.52 + .025 * Math.sin(a * 5 + time * 4 + k));
+            const x = centerX + Math.cos(a) * r;
+            const y = baseY - scale * .16 + Math.sin(a) * r * .24;
+            if (j === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+          }
+          ctx.strokeStyle = k % 2 ? '#6efaff' : '#0bbcff';
+          ctx.lineWidth = Math.max(.7, scale / 170);
+          ctx.globalAlpha = orbit * .30;
+          ctx.stroke();
+        }
+      }
+    }
+    // Đi từ đúng tâm đĩa lên nửa tim; không vượt qua giữa tim.
+    function energyPath(lane,u) {
+      const a=-Math.PI/2+lane*TAU/5;
+      const rise=smoothstep(0,.88,u);
+      const radius=.22*Math.sin(u*Math.PI)*(1-smoothstep(.60,1,u));
+      const angle=a+Math.sin(u*Math.PI)*.55;
+      return {x:Math.cos(angle)*radius,
+        y:1.28*(1-rise),z:Math.sin(angle)*radius*.45};
+    }
+    function photoPath(index,count=photos.length,progress) {
+      const duration=Math.max(4,CONFIG.photoFlightSeconds);
+      const elapsed=time-Math.max(photoStart,formationEnd)-index*duration/Math.max(1,count);
+      const u=progress===undefined?fract(Math.max(0,elapsed)/duration):progress;
+      const path=energyPath(index%5,u),point=project(path.x,path.y,path.z,Math.cos(rotationAngle),Math.sin(rotationAngle));
+      const lift=smoothstep(0,.88,u),cardWidth=clamp(scale*.46,44,92)*point.depth;
+      return {u,x:point.x-driftX*scale*.035*(1-lift),y:point.y-driftY*scale*.02*(1-lift),w:cardWidth,h:cardWidth,
+        alpha:(elapsed<0&&progress===undefined?0:1)*smoothstep(.015,.12,u)*(1-smoothstep(.55,.98,u))};
+    }
+    function drawPhotoRays(reveal) {
+      if(reveal<=0) return;
+      const count=photos.length||3;
+      for(let i=0;i<count;i++) {
+        // Tia sáng theo đường đi vào tim, cùng quỹ đạo với ảnh và hạt.
+        const duration=Math.max(4,CONFIG.photoFlightSeconds);
+        const age=Math.max(0,time-CONFIG.introSeconds)/duration;
+        const progress=photos.length?photoPath(i,count).u:fract(Math.max(0,age-i/3));
+        const p=photoPath(i,count,progress),strength=reveal*Math.sin(progress*Math.PI)*.24;
+        if(strength<.005) continue;
+        const origin=photoPath(i,count,0);
+        const gradient=ctx.createLinearGradient(origin.x,origin.y,p.x,p.y);
+        gradient.addColorStop(0,'#3cdfff00');gradient.addColorStop(.12,'#22beff60');
+        gradient.addColorStop(.80,'#55dfff80');gradient.addColorStop(1,'#b2faff');
+        for(let pass=0;pass<2;pass++) {
+          ctx.beginPath();
+          for(let j=0;j<=28;j++) {
+            const v=j/28*p.u;
+            const point=photoPath(i,count,v);
+            if(!j) ctx.moveTo(point.x,point.y);else ctx.lineTo(point.x,point.y);
+          }
+          ctx.strokeStyle=gradient;ctx.lineWidth=pass?1:7;
+          ctx.globalAlpha=strength*(pass?1:.14);ctx.stroke();
+        }
+        for(let j=0;j<10;j++) {
+          const v=Math.max(0,p.u-j*.006),point=photoPath(i,count,v);
+          particle(cyanSprite,point.x,point.y,.65, strength*(1-j/11));
+        }
+        for(let j=0;j<4;j++) {
+          const travel=fract(time*.24+j/4+i*.13),point=photoPath(i,count,p.u*travel);
+          particle(cyanSprite,point.x,point.y,.8,strength*Math.sin(travel*Math.PI)*.6);
+        }
+      }
+    }
+    function drawFlyingPhotos() {
+      photoContext.clearRect(0,0,width,height);
+      for(let i=0;i<photos.length;i++) {
+        const p=photoPath(i);
+        if(p.alpha<.01) continue;
+        photoContext.save();photoContext.globalAlpha=p.alpha;
+        photoContext.translate(p.x,p.y);photoContext.rotate(Math.sin(time*.6+i)*.025);
+        photoContext.drawImage(photos[i].card,-p.w/2,-p.h/2,p.w,p.h);
+        photoContext.restore();
+      }
+    }
+    function updateGiftMessage() {
+      const age=time-formationEnd-MESSAGE_TIMING.delay;
+      if(age<0||!messages.length||(!MESSAGE_TIMING.loop&&age>=messageCycle)) {
+        messageElement.hidden=true;return;
+      }
+      let index=0,local=age%messageCycle;
+      while(index<messageSequence.length-1&&local>=messageSequence[index].duration) {
+        local-=messageSequence[index].duration;index++;
+      }
+      const message=messageSequence[index],fadeStart=message.typing+messageHold;
+      const opacity=1-smoothstep(fadeStart,fadeStart+messageFade,local);
+      messageElement.hidden=false;
+      if(index!==messageIndex) {
+        messageIndex=index;messageElement.replaceChildren();
+        messageWords=message.words.map((word,i)=>{
+          if(i) messageElement.append(document.createTextNode(' '));
+          const span=document.createElement('span');span.className='gift-word';span.textContent=word;
+          messageElement.append(span);return span;
+        });
+        messageLayoutDirty=true;
+      }
+      // Giữ sẵn diện tích cả câu để chữ không đổi dòng hay nhảy vị trí khi thêm từ.
+      for(let i=0;i<messageWords.length;i++) {
+        const revealed=smoothstep(i*wordInterval,i*wordInterval+wordReveal,local);
+        messageWords[i].style.opacity=revealed.toFixed(3);
+        messageWords[i].style.transform=`translateY(${((1-revealed)*3).toFixed(2)}px)`;
+      }
+      if(messageLayoutDirty||Math.abs(heartTop-messageCeiling)>2) {
+        // Giữa mép trên và đỉnh tim thực tế; luôn chừa khoảng trống cho quầng sáng.
+        const margin=Math.max(12,Math.min(24,height*.025)),bottom=heartTop-26;
+        const available=Math.max(12,bottom-margin);
+        let font=clamp(Math.min(width,height)*.055,18,34);
+        messageElement.style.maxHeight='none';messageElement.style.fontSize=font+'px';
+        while(messageElement.offsetHeight>available&&font>10) {
+          font-=1;messageElement.style.fontSize=font+'px';
+        }
+        messageElement.style.maxHeight=available+'px';
+        messageBaseTop=margin+Math.max(0,(available-messageElement.offsetHeight)/2);
+        messageCeiling=heartTop;messageLayoutDirty=false;
+      }
+      messageElement.style.opacity=opacity.toFixed(3);
+      messageElement.style.top=(messageBaseTop+(1-opacity)*6)+'px';
+      messageElement.style.filter=`blur(${((1-opacity)*2).toFixed(2)}px)`;
+      messageElement.setAttribute('aria-hidden',String(opacity<.01||local<=0));
+    }
+    function render() {
+      if (gpuParticles) gpuParticles.begin();
+      ctx.globalAlpha = 1;
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.drawImage(backgroundCanvas,0,0,width,height);
+      ctx.globalCompositeOperation = 'lighter';
+      drawStars();
+      const burst = burstStrength();
+      const formation=formationState(),reveal=formation.opacity;
+      drawPool(burst, reveal);
+      drawPhotoRays(reveal);
+      drawRising(burst, reveal);
+      drawHeart(burst, reveal);
+      drawRibbons(burst, reveal);
+      drawSurge(burst, reveal);
+      if (gpuParticles) gpuParticles.flush();
+      drawFlyingPhotos();
+      updateGiftMessage();
+      ctx.globalAlpha = 1;
+      ctx.globalCompositeOperation = 'source-over';
+    }
+    function frame(timestamp) {
+      const dt=lastTimestamp?Math.min((timestamp-lastTimestamp)/1000,.15):0;
+      lastTimestamp=timestamp;
+      const animated=!paused&&!document.hidden;
+      if(animated) {
+        time+=dt;
+        if(CONFIG.rotate&&!drag&&time>formationEnd)
+          targetYaw+=Math.min(dt,time-formationEnd)*TAU/Math.max(1,CONFIG.rotationSeconds);
+      }
+      const cameraMoving=Math.abs(targetYaw-rotationAngle)>.00001;
+      if(!document.hidden&&(animated||cameraMoving||sceneDirty)) {
+        rotationAngle+=(targetYaw-rotationAngle)*(1-Math.exp(-dt*16));
+        render();sceneDirty=false;
+      }
+      requestAnimationFrame(frame);
+    }
+    function triggerBurst() {manualBurstTime=Math.max(time,formationEnd);paused=false;}
+    function replay() {time=photoStart=rotationAngle=targetYaw=0;manualBurstTime=-100;paused=false;render();}
+    function resetView() {rotationAngle=targetYaw=0;render();}
+    canvas.addEventListener('pointerdown',event=>{
+      if(drag||!event.isPrimary||event.button!==0) return;
+      targetYaw=rotationAngle;
+      drag={id:event.pointerId,x:event.clientX,yaw:rotationAngle};
+      canvas.setPointerCapture(event.pointerId);document.body.classList.add('dragging');
+    });
+    canvas.addEventListener('pointermove',event=>{
+      if(!drag||event.pointerId!==drag.id) return;
+      targetYaw=drag.yaw+(event.clientX-drag.x)*TAU/Math.max(400,Math.min(width,height));
+      sceneDirty=true;
+    });
+    function endDrag(event) {
+      if(!drag||event.pointerId!==drag.id) return;
+      const id=drag.id;drag=null;document.body.classList.remove('dragging');
+      if(canvas.hasPointerCapture(id)) canvas.releasePointerCapture(id);
+    }
+    canvas.addEventListener('pointerup',endDrag);
+    canvas.addEventListener('pointercancel',endDrag);
+    canvas.addEventListener('lostpointercapture',endDrag);
+    window.addEventListener('blur',()=>{if(drag)endDrag({pointerId:drag.id});});
+    window.addEventListener('resize',resize);
+    document.addEventListener('visibilitychange',()=>{lastTimestamp=0;});
+    resize();requestAnimationFrame(frame);
+    const photosReady=loadManualPhotos();
+
+    // API nhỏ để tích hợp và để kiểm tra các thời điểm của hiệu ứng.
+    window.blueHeart = {
+      config: CONFIG,
+      pause() { paused = true; },
+      play() { paused = false; },
+      replay,
+      burst: triggerBurst,
+      seek(seconds) { time = Math.max(0, Number(seconds) || 0); rotationAngle=targetYaw=(Math.max(0,time-formationEnd)/CONFIG.rotationSeconds*TAU)%TAU; manualBurstTime = -100; render(); },
+      setRotation(degrees) { rotationAngle=targetYaw=(Number(degrees)||0)/180*Math.PI; render(); },
+      resetView,
+      get time() { return time; },
+      get rotation() { return rotationAngle/Math.PI*180; },
+      get view() { return {yaw:rotationAngle/Math.PI*180,pitch:0,zoom:cameraZoom}; },
+      photosReady,
+      get photoCount() { return photos.length; },
+      get meteorCount() { return activeMeteorCount; },
+      get stage() { return time<CONFIG.introSeconds?'meteor-shower':time<formationEnd?'formation':'heart'; },
+      get renderer() { return gpuParticles ? 'WebGL' : 'Canvas2D'; }
+    };
+  })();
+  </script>
+</body>
+</html>
